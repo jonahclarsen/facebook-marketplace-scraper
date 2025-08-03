@@ -8,7 +8,7 @@
 
 # Import the necessary libraries.
 # Playwright is used to crawl the Facebook Marketplace.
-from playwright.sync_api import sync_playwright, Page
+from playwright.async_api import async_playwright, Page
 # The os library is used to get the environment variables.
 import os
 # The time library is used to add a delay to the script.
@@ -22,6 +22,14 @@ import json
 # The uvicorn library is used to run the API.
 import uvicorn
 from fastapi.middleware.cors import CORSMiddleware
+# Import logging for debugging
+import logging
+# Import asyncio for async operations
+import asyncio
+
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
                  
 # Create an instance of the FastAPI class.
 app = FastAPI()
@@ -43,66 +51,70 @@ app.add_middleware(
 # Global variables for the browser and page
 browser = None
 page = None
+playwright_instance = None
 
-def initialize_browser():
-    global browser, page
+async def initialize_browser():
+    global browser, page, playwright_instance
     try:
       if browser is None:
-          playwright = sync_playwright().start()
-          browser = playwright.chromium.launch(headless=False, args=['--enable-logging', '--v=1'])
-          page = browser.new_page()
+          playwright_instance = await async_playwright().start()
+          browser = await playwright_instance.chromium.launch(headless=False, args=['--enable-logging', '--v=1'])
+          page = await browser.new_page()
     except Exception as e:
       logger.error(f"Error initializing browser: {e}")
-      restart_browser()
+      await restart_browser()
 
-def login_and_goto_marketplace(initial_url, marketplace_url):
+async def login_and_goto_marketplace(initial_url, marketplace_url):
     global page
-    page.goto(initial_url)
-    time.sleep(2)
+    await page.goto(initial_url)
+    await page.wait_for_timeout(2000)
     try:
       # If url does not contain "login", we assume we are logged in and redirect to marketplace
       if "login" not in page.url:
-          page.goto(marketplace_url)
+          await page.goto(marketplace_url)
           return
       # If not logged in, go to Facebook homepage and wait for manual login
-      page.goto("https://www.facebook.com")
-      wait_for_user_login(page)
+      await page.goto("https://www.facebook.com")
+      await wait_for_user_login(page)
       
       # After login, navigate to marketplace
-      page.goto(marketplace_url)
-      time.sleep(5)  # Wait for marketplace to load
+      await page.goto(marketplace_url)
+      await page.wait_for_timeout(5000)  # Wait for marketplace to load
         
     except Exception as e:
       logger.error(f"Login error: {e}")
-      restart_browser()
+      await restart_browser()
 
-def wait_for_user_login(page):
-    st.info("Please log in manually in the opened Chromium window...")
+async def wait_for_user_login(page):
     print("Please login manually in the browser window...")
 
     # Wait for navigation after form submission
-    with page.expect_navigation(timeout=600_000):  # wait up to 10 minutes
+    async with page.expect_navigation(timeout=600_000):  # wait up to 10 minutes
         # Wait for the login button to appear
-        page.wait_for_selector('button[name="login"]')
+        await page.wait_for_selector('button[name="login"]')
         print("Login button is available. Waiting for user to submit the form...")
 
         # Optionally: Wait until button is actually clicked
-        page.locator('button[name="login"]').wait_for(state="detached", timeout=600_000)
+        await page.locator('button[name="login"]').wait_for(state="detached", timeout=600_000)
 
     print("Login detected, proceeding with scraping...")
     # TODO: this is not automatically going to marketplace, have to hit force run again.
     # If we can't get it auto redirecting we should just have a separate login button
  
-def goto_marketplace(marketplace_url):
-    page.goto(marketplace_url)
+async def goto_marketplace(marketplace_url):
+    await page.goto(marketplace_url)
 
-def restart_browser():
-    global browser, page
+async def restart_browser():
+    global browser, page, playwright_instance
     logger.warning("Restarting the browser due to crash or failure...")
     if browser:
-        browser.close()
+        await browser.close()
+    if playwright_instance:
+        await playwright_instance.stop()
     browser = None
-    initialize_browser()
+    page = None
+    playwright_instance = None
+    await initialize_browser()
 
 
 # Create a route to the root endpoint.
@@ -117,7 +129,9 @@ def root():
 # Define a function to be executed when the endpoint is called.
 # Add a description to the function.
 # TODO: days since listed input
-def crawl_facebook_marketplace(city: str, query: str, max_price: int, max_results_per_query: int):
+async def crawl_facebook_marketplace(city: str, query: str, max_price: int, max_results_per_query: int):
+    print(f"[API] Received request: city={city}, query={query}, max_price={max_price}, max_results={max_results_per_query}")
+    
     # Define dictionary of cities from the facebook marketplace directory for United States.
     # https://m.facebook.com/marketplace/directory/US/?_se_imp=0oey5sMRMSl7wluQZ
     cities = {
@@ -141,12 +155,18 @@ def crawl_facebook_marketplace(city: str, query: str, max_price: int, max_result
     results = []
     # Split the query into a list
     query_list = query.split(',')
+    print(f"[API] Processing {len(query_list)} queries: {query_list}")
+    
     for query in query_list:
       try:
+        print(f"[API] Crawling query: '{query}'")
         # TODO: umm it seems to only consider the query the first time around? Or is that because im not signing in anymore?
-        recent_query_results = crawl_query(city, query, max_price, max_results_per_query, False)
-        suggested_results =  crawl_query(city, query, max_price, max_results_per_query, True)
-      except:
+        recent_query_results = await crawl_query(city, query.strip(), max_price, max_results_per_query, False)
+        suggested_results = await crawl_query(city, query.strip(), max_price, max_results_per_query, True)
+        
+        print(f"[API] Query '{query}' - Recent: {len(recent_query_results)}, Suggested: {len(suggested_results)}")
+      except Exception as e:
+        print(f"[API] Error crawling query '{query}': {e}")
         recent_query_results = []
         suggested_results = []
 
@@ -161,6 +181,7 @@ def crawl_facebook_marketplace(city: str, query: str, max_price: int, max_result
 
       results.extend(consolidated_query_results)
 
+    print(f"[API] Total results returning: {len(results)}")
     return results
 
 if __name__ == "__main__":
@@ -173,27 +194,32 @@ if __name__ == "__main__":
         port=8000
     )
 
-def crawl_query(city: str, query: str, max_price: int, max_results: int, suggested: bool):
+async def crawl_query(city: str, query: str, max_price: int, max_results: int, suggested: bool):
   global page
   try:
+    scrape_type = "suggested" if suggested else "recent"
     marketplace_url = f'https://www.facebook.com/marketplace/{city}/search?query={query}&maxPrice={max_price}&daysSinceListed=1&sortBy=creation_time_descend'
     initial_url = "https://www.facebook.com/login/device-based/regular/login/"
     if suggested:
       marketplace_url = f'https://www.facebook.com/marketplace/{city}/search?query={query}&maxPrice={max_price}&daysSinceListed=3'
 
-    # Initialize browser if not already initialized
-    initialize_browser()
+    print(f"[CRAWL] {scrape_type.upper()}: {marketplace_url}")
 
-    login_and_goto_marketplace(initial_url, marketplace_url)
-    # goto_marketplace(marketplace_url) # TODO: if login captcha locked.. comment above and uncomment this
+    # Initialize browser if not already initialized
+    await initialize_browser()
+
+    # await login_and_goto_marketplace(initial_url, marketplace_url)
+    await goto_marketplace(marketplace_url) # TODO: if login captcha locked.. comment above and uncomment this
 
     # Get listings of particular item in a particular city for a particular price.
     # Wait for the page to load.
-    time.sleep(5)
-    html = page.content()
+    await page.wait_for_timeout(5000)
+    html = await page.content()
     soup = BeautifulSoup(html, 'html.parser')
     parsed = []
     listings = soup.find_all('div', class_='x9f619 x78zum5 x1r8uery xdt5ytf x1iyjqo2 xs83m0k x135b78x x11lfxj5 x1iorvi4 xjkvuk6 xnpuxes x1cjf5ee x17dddeq')
+    
+    print(f"[CRAWL] {scrape_type.upper()}: Found {len(listings)} listing divs on page")
 
     for listing in listings:
       # Get the item image.
@@ -214,15 +240,26 @@ def crawl_query(city: str, query: str, max_price: int, max_results: int, suggest
 
       # Only add the item if the title includes any of the query terms
       query_parts = query.split(' ')
-      if title is not None and post_url is not None and image is not None and any(part.lower() in title.lower() for part in query_parts):
-        # Append the parsed data to the list.
-        parsed.append({
-            'image': image,
-            # 'location': location,
-            'title': title,
-            # 'price': price,
-            'post_url': post_url
-        })
+      if title is not None and post_url is not None and image is not None:
+        matches_query = any(part.lower() in title.lower() for part in query_parts)
+        if matches_query:
+          # Append the parsed data to the list.
+          parsed.append({
+              'image': image,
+              # 'location': location,
+              'title': title,
+              # 'price': price,
+              'post_url': post_url
+          })
+          print(f"[CRAWL] {scrape_type.upper()}: Added item: {title}")
+        else:
+          print(f"[CRAWL] {scrape_type.upper()}: Skipped item (no query match): {title}")
+      else:
+        missing = []
+        if title is None: missing.append("title")
+        if post_url is None: missing.append("url")
+        if image is None: missing.append("image")
+        print(f"[CRAWL] {scrape_type.upper()}: Skipped item (missing {', '.join(missing)})")
 
     # Return the parsed data as a JSON.
     # TODO: put in a dict for query headings
@@ -242,5 +279,5 @@ def crawl_query(city: str, query: str, max_price: int, max_results: int, suggest
     return result
   except Exception as e:
     logger.error(f"Error during crawl: {e}")
-    restart_browser()  # Restart on failure
+    # await restart_browser()  # Restart on failure
 

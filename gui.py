@@ -1,23 +1,11 @@
 import random
 import streamlit as st
-import schedule
 import streamlit.components.v1 as stcomponents
 import time
 import json 
 import requests
 from datetime import datetime
 from PIL import Image
-
-def countdown_timer():
-  countdown_message.empty()
-  duration = 5 * 60
-  while duration:
-        mins, secs = divmod(duration, 60)
-        timeformat = '{:02d}:{:02d}'.format(mins, secs)
-        countdown_message.text(f"Time until next auto scrape: {timeformat}")
-        time.sleep(1)
-        duration -= 1
-  countdown_message.text("Scraping...")
 
 
 def ding():
@@ -51,9 +39,24 @@ def crawl():
 
   # Convert the response from json into a Python list.
   try:
-    res = requests.get(f"http://127.0.0.1:8000/crawl_facebook_marketplace?city={city}&sortBy=creation_time_descend&query={query}&max_price={str(int(max_price) * 100)}&max_results_per_query={max_listings}")
-    results = res.json()
-  except: # TODO: this crashes every now and then without a restart being triggered on app.py
+    api_url = f"http://127.0.0.1:8000/crawl_facebook_marketplace?city={city}&sortBy=creation_time_descend&query={query}&max_price={str(int(max_price) * 100)}&max_results_per_query={max_listings}"
+    print(f"[{datetime.now().strftime('%H:%M:%S')}] Making API request: {api_url}")
+    
+    res = requests.get(api_url)
+    print(f"[{datetime.now().strftime('%H:%M:%S')}] API Response Status: {res.status_code}")
+    
+    if res.status_code == 200:
+      results = res.json()
+      print(f"[{datetime.now().strftime('%H:%M:%S')}] API returned {len(results)} results")
+      if len(results) > 0:
+        print(f"[{datetime.now().strftime('%H:%M:%S')}] First result: {results[0]}")
+      else:
+        print(f"[{datetime.now().strftime('%H:%M:%S')}] No results returned from API")
+    else:
+      print(f"[{datetime.now().strftime('%H:%M:%S')}] API Error: {res.status_code} - {res.text}")
+      results = []
+  except Exception as e:
+    print(f"[{datetime.now().strftime('%H:%M:%S')}] Exception during API call: {e}")
     results = []
 
   # Display the length of the results list.
@@ -87,8 +90,6 @@ def crawl():
         st.image(img_url, width=200)
         st.write(f"https://www.facebook.com{item['link']}")
         st.write("----")
-
-  countdown_timer()
 
 # End of private functions
 
@@ -126,12 +127,67 @@ if submit:
   countdown_message.text("Scraping...")
   crawl()
 
-# Schedule the scraper to run every 5 minutes # TODO: interval to variable
-schedule.every(3).minutes.do(crawl)
-# Timer message
-countdown_timer() # TODO: FIRST auto scrape not working?
+# Add refresh button for updating the page
+col1, col2 = st.columns(2)
+with col1:
+    refresh_page = st.button("🔄 Refresh Page")
+with col2:
+    auto_scrape_interval = st.selectbox("Auto-scrape interval", 
+                                       ["Disabled", "1 minute", "3 minutes", "5 minutes", "10 minutes"], 
+                                       index=3)
 
-# Run the scheduler
-while True:
-  schedule.run_pending()
-  time.sleep(2)  # Sleep for 1 second to avoid high CPU usage
+# Initialize timing
+if 'last_manual_scrape' not in st.session_state:
+    st.session_state.last_manual_scrape = None
+
+# Convert interval to seconds
+interval_seconds = {
+    "Disabled": 0,
+    "1 minute": 60,
+    "3 minutes": 180,
+    "5 minutes": 300,
+    "10 minutes": 600
+}[auto_scrape_interval]
+
+# Auto-scrape logic (only if enabled)
+if interval_seconds > 0:
+    if 'last_auto_scrape' not in st.session_state:
+        st.session_state.last_auto_scrape = time.time()
+    
+    current_time = time.time()
+    time_since_last_scrape = current_time - st.session_state.last_auto_scrape
+    
+    if time_since_last_scrape >= interval_seconds:
+        st.session_state.last_auto_scrape = current_time
+        print(f"[{datetime.now().strftime('%H:%M:%S')}] Auto-scraping triggered (interval: {auto_scrape_interval})")
+        countdown_message.text("Auto-scraping...")
+        crawl()
+    else:
+        # Show time until next auto-scrape
+        time_until_next = interval_seconds - time_since_last_scrape
+        mins, secs = divmod(int(time_until_next), 60)
+        countdown_message.text(f"Auto-scrape in: {mins:02d}:{secs:02d} (interval: {auto_scrape_interval})")
+else:
+    countdown_message.text("Auto-scraping disabled. Use 'Force Scrape Now!' to scrape manually.")
+
+# Handle manual refresh
+if refresh_page:
+    st.rerun()
+
+# Allow running the GUI directly with python gui.py
+if __name__ == "__main__":
+    import subprocess
+    import sys
+    import os
+    
+    print("Starting Streamlit server...")
+    print("You can view console output here!")
+    print("=" * 50)
+    
+    # Run streamlit with the current file
+    subprocess.run([
+        sys.executable, "-m", "streamlit", "run", __file__,
+        "--server.address", "localhost",
+        "--server.port", "8501",
+        "--browser.gatherUsageStats", "false"
+    ])
